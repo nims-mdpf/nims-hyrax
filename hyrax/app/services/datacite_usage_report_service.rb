@@ -1,5 +1,6 @@
 require 'csv'
 require 'json'
+require 'net/http'
 
 class DataciteUsageReportService
   attr_accessor :data_dir, :report, :list_of_files, :report_location
@@ -353,4 +354,47 @@ class DataciteUsageReportService
     metric
   end
 
+  def send_report
+    api_url = ENV.fetch('datacite_usage_report_api_endpoint', nil)
+    api_token = ENV.fetch('datacite_usage_report_api_token', nil)
+    no_api_url = "Environment variable datacite_usage_report_api_endpoint not set"
+    no_api_token = "Environment variable datacite_usage_report_api_token not set"
+    raise DataciteUsageReportException.new(no_api_url) unless api_url.present?
+    raise DataciteUsageReportException.new(no_api_token) unless no_api_token.present?
+    uri = URI(api_url)
+    request = Net::HTTP::Post.new(uri)
+    request.content_type = 'application/json; Accept: application/json'
+    request['Authorization'] = "Bearer #{api_token}"
+
+    request.body = @report.to_json
+
+    request_options = {
+      use_ssl: uri.scheme == 'https'
+    }
+
+    success = false
+    response = Net::HTTP.start(uri.hostname, uri.port, request_options) do |http|
+      http.request(request)
+    end
+    success = true if response.response.code.to_i.between?(200, 299)
+    return success, response.body, response
+  end
+
 end
+
+# ---------------------------
+# Usage
+# ---------------------------
+# start_date = "2024-01-01"
+# end_date = "2025-03-31"
+# data_dir = "data/access_log"
+# format = "%Y-%m-%d"
+# report_location = "data/"
+# works = [] # for all works
+# works = ["7d278x37v"] # for specific work(s)
+# d = DataciteUsageReportService.new(start_date, end_date, data_dir,
+#                                    format: format,
+#                                    report_location: report_location,
+#                                    save_report: true)
+# d.generate_report(works)
+# success, response_body, response = d.send_report

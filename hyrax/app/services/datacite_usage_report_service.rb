@@ -1,7 +1,8 @@
 require 'csv'
+require 'json'
 
 class DataciteUsageReportService
-  attr_accessor :report, :list_of_files, :report_location
+  attr_accessor :data_dir, :report, :list_of_files, :report_location
 
   class DataciteUsageReportException < StandardError
     def initialize(msg="MDR Datacite usage report service exception")
@@ -15,12 +16,17 @@ class DataciteUsageReportService
   REPORT_NAME_RELEASE = "rd1"
   REPORT_CREATOR = "MDR"
 
-  def initialize(start_date, end_date, format=nil)
+  def initialize(start_date, end_date, data_dir, format: nil, report_location: "/data/data", save_report: false)
+    raise DataciteUsageReportException.new("Cannot find #{data_dir}") unless Dir.exist?(data_dir)
     @report = {}
     @list_of_files = {}
-    @report_location = nil
     @start_date = start_date
     @end_date = end_date
+    @data_dir = data_dir
+    @data_dir = "#{data_dir}/" unless data_dir.end_with?("/")
+    @report_location = report_location
+    @report_location = "#{report_location}/" unless report_location.end_with?("/")
+    @save_report = save_report
     begin
       if format
         @start_dt_parsed = Date.strptime(@start_date, format)
@@ -28,7 +34,7 @@ class DataciteUsageReportService
         @start_dt_parsed = Date.parse(@start_date)
       end
     rescue
-      raise DataciteUsageReportException("Cannot parse start date")
+      raise DataciteUsageReportException.new("Cannot parse start date")
     end
     begin
       if format
@@ -44,41 +50,33 @@ class DataciteUsageReportService
   def generate_report(works=[])
     initialize_report
     add_report_datasets(works)
+    write_report if @save_report
+  end
+
+  def write_report
+    report_time = Time.now.strftime("%Y-%m-%dT%H-%M-%S")
+    report_name = "datacite_usage_report-#{report_time}.json"
+    File.open("#{@report_location}#{report_name}","w") do |f|
+      f.write(JSON.pretty_generate(@report))
+    end
   end
 
   def initialize_report
     @report = {
-      "report-header": {
-        "report-name": self.REPORT_NAME,
-        "report-id": self.REPORT_NAME_SHORT,
-        "release": "RD1",
-        "created-by": self.REPORT_CREATOR,
-        "created": Time.now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "reporting-period": {
-          "end-date": @end_dt_parsed.strftime("%Y-%m-%d"),
-          "begin-date": @start_dt_parsed.strftime("%Y-%m-%d")
+      "report-header" => {
+        "report-name" => REPORT_NAME,
+        "report-id" => REPORT_NAME_SHORT,
+        "release" => REPORT_NAME_RELEASE,
+        "created-by" => REPORT_CREATOR,
+        "created" => Time.now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reporting-period" => {
+          "end-date" => @end_dt_parsed.strftime("%Y-%m-%d"),
+          "begin-date" => @start_dt_parsed.strftime("%Y-%m-%d")
         }
       },
-      "id": self.REPORT_ID,
-      "report-datasets": []
+      "id" => REPORT_ID,
+      "report-datasets" => []
     }
-  end
-
-  def gather_files(works=[])
-    csv_files = {}
-    if works
-      works.each do |work_id|
-        pattern =  "*/*#{work_id}*.csv"
-        csv_files = csv_files.merge(_gather_files_for_pattern(pattern))
-      end
-    else
-      pattern = "*/*.csv"
-      csv_files = csv_files.merge(_gather_files_for_pattern(pattern))
-    end
-    csv_files.each do |work_key, files|
-      csv_files[work_key] = _sort_list_of_files(files)
-    end
-    csv_files
   end
 
   def add_report_datasets(works=[])
@@ -93,16 +91,32 @@ class DataciteUsageReportService
   end
 
   def add_each_report_dataset(files, work_id, work_type)
-    dataset_metrics = _get_dataset_metrics(files)
+    dataset_metrics = get_dataset_metrics(files)
     if dataset_metrics.size > 0
-      dataset_report = {}
-      dataset_report = _get_dataset_metadata(files[0], work_id, work_type)
+      dataset_report = get_dataset_metadata(files[0], work_id, work_type)
       dataset_report["performance"] = dataset_metrics
       @report["report-datasets"].append(dataset_report)
     end
   end
 
-  def _sort_list_of_files(files)
+  def gather_files(works=[])
+    csv_files = {}
+    if works.present?
+      works.each do |work_id|
+        pattern =  "#{@data_dir}*/*#{work_id}*.csv"
+        csv_files = csv_files.merge(gather_files_for_pattern(pattern))
+      end
+    else
+      pattern = "#{@data_dir}*/*.csv"
+      csv_files = csv_files.merge(gather_files_for_pattern(pattern))
+    end
+    csv_files.each do |work_key, files|
+      csv_files[work_key] = sort_list_of_files(files)
+    end
+    csv_files
+  end
+
+  def sort_list_of_files(files)
     sorted_files = files.sort_by do |s|
       name_parts = File.basename(s, ".csv").split('_')
       name_date="#{name_parts[2]}-#{name_parts[3].rjust(2, '0')}-01"
@@ -111,26 +125,28 @@ class DataciteUsageReportService
     sorted_files
   end
 
-  def _gather_files_for_pattern(pattern)
+  def gather_files_for_pattern(pattern)
     csv_files = {}
     Dir.glob(pattern) {|filename|
       name_parts = File.basename(filename, ".csv").split('_')
       prefix = name_parts[0]
       work_id = name_parts[1]
-      if _file_in_range?(filename)
+      if file_in_range?(filename)
         csv_files["#{prefix}_#{work_id}"] ||= []
         csv_files["#{prefix}_#{work_id}"].append(filename)
       end
     }
+    csv_files
   end
 
-  def _file_in_range?(filename)
+  def file_in_range?(filename)
     name_parts = File.basename(filename, ".csv").split('_')
     name_date="#{name_parts[2]}-#{name_parts[3].rjust(2, '0')}-01"
-    @start_dt_parsed <= Date.strptime(name_date, "%Y-%m-%d") >= @end_dt_parsed
+    dt = Date.strptime(name_date, "%Y-%m-%d")
+    (@start_dt_parsed <= dt) && (dt <= @end_dt_parsed)
   end
 
-  def _get_dataset_metrics(files)
+  def get_dataset_metrics(files)
     # Total_Item_Requests, Total_Downloads_For_Item, Reporting period
     # 0, 0, 1-2024
     # Total_Item_Requests = total-dataset-investigations
@@ -177,16 +193,16 @@ class DataciteUsageReportService
           start_date = "#{year}-#{month}-01"
           end_date = (Date.strptime(start_date, "%Y-%m-%d").next_month - 1).strftime("%Y-%m-%d")
           period = {
-            "end-date": end_date,
-            "begin-date": start_date
+            "end-date" => end_date,
+            "begin-date" => start_date
           }
         end
-        views = _fetch_count(row_hash, "views" )
-        downloads = _fetch_count(row_hash, "downloads")
+        views = fetch_count(row_hash, "views" )
+        downloads = fetch_count(row_hash, "downloads")
         if (views.present? || downloads.present?) && period.present?
           metrics.append({
-                               "period": period,
-                               "instance": []
+                               "period" => period,
+                               "instance" => []
                              })
           metrics["instance"].append(views) if views.present?
           metrics["instance"].append(downloads) if downloads.present?
@@ -196,7 +212,7 @@ class DataciteUsageReportService
     metrics
   end
 
-  def _get_dataset_metadata(csv_file, work_id, work_type)
+  def get_dataset_metadata(csv_file, work_id, work_type)
     metadata = {}
     return metadata unless File.exist?(csv_file)
     CSV.foreach(csv_file, headers: true) do |csv_row|
@@ -214,7 +230,7 @@ class DataciteUsageReportService
       end
       # "platform": "DataONE",
       if metadata.present?
-        metadata["platform"] = self.REPORT_CREATOR
+        metadata["platform"] = REPORT_CREATOR
       end
       # "data-type": "dataset",
       data_type =  row_hash.fetch("Data_Type", work_type)
@@ -225,8 +241,8 @@ class DataciteUsageReportService
       if publisher.strip.downcase == "nims"
         metadata["publisher-id"] = [
           {
-            "type": "grid",
-            "value": "grid.21941.3f"
+            "type" => "grid",
+            "value" => "grid.21941.3f"
           }
         ]
       end
@@ -298,7 +314,7 @@ class DataciteUsageReportService
     metadata
   end
 
-  def _fetch_count(row_hash, count_type)
+  def fetch_count(row_hash, count_type)
     return {} unless %w[views downloads].include?(count_type)
     if count_type == "views"
       # Total_Item_Requests = total-dataset-investigations
@@ -328,12 +344,13 @@ class DataciteUsageReportService
       end
       if requests_count > 0
         metric = {
-          "count": requests_count,
-          "metric-type": metric_name,
-          "access-method": "regular"
+          "count" => requests_count,
+          "metric-type" => metric_name,
+          "access-method" => "regular"
         }
       end
     end
     metric
   end
+
 end
